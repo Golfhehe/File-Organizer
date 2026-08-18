@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "300 Ngày — Study Manager"
+description = "A focused Vietnamese study manager for tracking exam countdown, daily tasks, study time, streaks, and progress toward the June 14, 2027 exam."
+version = "1.0.0"
+id = "artifacts/study-manager-300-days"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 18851
+
+[services.development]
+run = "pnpm --filter @workspace/study-manager-300-days run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/study-manager-300-days", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/study-manager-300-days/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "18851"
+BASE_PATH = "/"

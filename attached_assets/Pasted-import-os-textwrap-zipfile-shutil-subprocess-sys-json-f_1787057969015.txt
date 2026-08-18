@@ -1,0 +1,399 @@
+import os, textwrap, zipfile, shutil, subprocess, sys, json
+from pathlib import Path
+
+base = Path("/mnt/data/study_manager_300days")
+if base.exists():
+    shutil.rmtree(base)
+base.mkdir(parents=True)
+
+app_py = r'''
+import sys, json
+from pathlib import Path
+from datetime import date, timedelta
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QLineEdit, QComboBox, QListWidget, QListWidgetItem, QProgressBar,
+    QFrame, QSpinBox, QMessageBox, QDialog, QDialogButtonBox, QFormLayout
+)
+
+APP_NAME = "300 Ngày"
+EXAM_DATE = date(2027, 6, 14)
+DATA_FILE = Path.home() / ".study_manager_300days.json"
+
+DEFAULT = {
+    "tasks": [
+        {"name": "Ôn Hóa chuyên", "subject": "Hóa", "done": False},
+        {"name": "Ôn Toán", "subject": "Toán", "done": False},
+        {"name": "Ôn Tiếng Anh", "subject": "Anh", "done": False},
+        {"name": "Luyện C++", "subject": "Tin", "done": False},
+    ],
+    "study_minutes": 0,
+    "streak": 0,
+    "last_study": None,
+}
+
+def load_data():
+    try:
+        return json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return DEFAULT.copy()
+
+def save_data(data):
+    DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+class AddTaskDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Thêm nhiệm vụ")
+        self.setMinimumWidth(360)
+        form = QFormLayout(self)
+        self.subject = QComboBox()
+        self.subject.addItems(["Hóa", "Toán", "Anh", "Tin", "KHTN", "Khác"])
+        self.name = QLineEdit()
+        self.name.setPlaceholderText("Ví dụ: Làm đề Hóa số 5")
+        form.addRow("Môn:", self.subject)
+        form.addRow("Nhiệm vụ:", self.name)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                   QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+class MainWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.data = load_data()
+        self.setWindowTitle(APP_NAME)
+        self.resize(1100, 700)
+        self.setMinimumSize(900, 600)
+        self.build_ui()
+        self.refresh()
+
+        timer = QTimer(self)
+        timer.timeout.connect(self.refresh_countdown)
+        timer.start(60000)
+
+    def card(self):
+        f = QFrame()
+        f.setObjectName("card")
+        return f
+
+    def build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(28, 24, 28, 24)
+        root.setSpacing(16)
+
+        top = QHBoxLayout()
+        title = QLabel("300 NGÀY")
+        title.setObjectName("title")
+        top.addWidget(title)
+        top.addStretch()
+        self.countdown = QLabel()
+        self.countdown.setObjectName("countdown")
+        top.addWidget(self.countdown)
+        root.addLayout(top)
+
+        columns = QHBoxLayout()
+        columns.setSpacing(16)
+        root.addLayout(columns, 1)
+
+        left = QVBoxLayout()
+        right = QVBoxLayout()
+        columns.addLayout(left, 3)
+        columns.addLayout(right, 2)
+
+        # Countdown
+        c = self.card()
+        l = QVBoxLayout(c)
+        h = QLabel("KỲ THI")
+        h.setObjectName("section")
+        self.exam = QLabel()
+        self.exam.setObjectName("exam")
+        l.addWidget(h)
+        l.addWidget(self.exam)
+        l.addWidget(QLabel("Mỗi ngày xử lý một chút. Đừng để 300 ngày chạy mất =))"))
+        left.addWidget(c)
+
+        # Tasks
+        c = self.card()
+        l = QVBoxLayout(c)
+        h = QLabel("VIỆC CẦN LÀM")
+        h.setObjectName("section")
+        l.addWidget(h)
+        self.tasks = QListWidget()
+        self.tasks.itemDoubleClicked.connect(self.toggle_task)
+        l.addWidget(self.tasks, 1)
+
+        row = QHBoxLayout()
+        add = QPushButton("+ Thêm")
+        done = QPushButton("✓ Hoàn thành")
+        delete = QPushButton("Xóa")
+        add.clicked.connect(self.add_task)
+        done.clicked.connect(self.toggle_selected)
+        delete.clicked.connect(self.delete_task)
+        row.addWidget(add); row.addWidget(done); row.addWidget(delete)
+        l.addLayout(row)
+
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(True)
+        l.addWidget(self.progress)
+        self.progress_text = QLabel()
+        l.addWidget(self.progress_text)
+        left.addWidget(c, 1)
+
+        # Stats
+        c = self.card()
+        l = QVBoxLayout(c)
+        h = QLabel("THỐNG KÊ")
+        h.setObjectName("section")
+        l.addWidget(h)
+        self.minutes = QLabel()
+        self.streak = QLabel()
+        self.today = QLabel()
+        l.addWidget(self.minutes)
+        l.addWidget(self.streak)
+        l.addWidget(self.today)
+        btn = QPushButton("+ Ghi thời gian học")
+        btn.clicked.connect(self.add_minutes)
+        l.addWidget(btn)
+        right.addWidget(c)
+
+        # Goal
+        c = self.card()
+        l = QVBoxLayout(c)
+        h = QLabel("MỤC TIÊU")
+        h.setObjectName("section")
+        l.addWidget(h)
+        goal = QLabel(
+            "🎯 Mục tiêu của app:\n\n"
+            "• Học đều mỗi ngày\n"
+            "• Hoàn thành từng nhiệm vụ nhỏ\n"
+            "• Theo dõi tiến độ\n"
+            "• Không để deadline biến thành jumpscare 💀"
+        )
+        goal.setWordWrap(True)
+        l.addWidget(goal)
+        right.addWidget(c, 1)
+
+    def refresh_countdown(self):
+        days = max(0, (EXAM_DATE - date.today()).days)
+        self.countdown.setText(f"CÒN {days} NGÀY")
+        self.exam.setText(f"Kỳ thi: {EXAM_DATE.strftime('%d/%m/%Y')}  •  {days} ngày nữa")
+
+    def refresh(self):
+        self.refresh_countdown()
+        self.tasks.clear()
+        done = 0
+        for i, task in enumerate(self.data["tasks"]):
+            mark = "✓" if task["done"] else "○"
+            text = f"{mark}  [{task['subject']}]  {task['name']}"
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, i)
+            self.tasks.addItem(item)
+            if task["done"]:
+                done += 1
+        total = len(self.data["tasks"])
+        pct = round(done / total * 100) if total else 0
+        self.progress.setValue(pct)
+        self.progress_text.setText(f"{done}/{total} nhiệm vụ hoàn thành  •  {pct}%")
+        self.minutes.setText(f"⏱  Tổng thời gian học: {self.data['study_minutes']} phút")
+        self.streak.setText(f"🔥  Streak: {self.data['streak']} ngày")
+        self.today.setText(f"📅  Hôm nay: {date.today().strftime('%d/%m/%Y')}")
+
+    def add_task(self):
+        d = AddTaskDialog(self)
+        if d.exec():
+            name = d.name.text().strip()
+            if not name:
+                QMessageBox.warning(self, "Thiếu nhiệm vụ", "Nhập nhiệm vụ trước nha.")
+                return
+            self.data["tasks"].append({
+                "name": name,
+                "subject": d.subject.currentText(),
+                "done": False
+            })
+            save_data(self.data)
+            self.refresh()
+
+    def selected_index(self):
+        item = self.tasks.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def toggle_task(self, item):
+        i = item.data(Qt.ItemDataRole.UserRole)
+        self.data["tasks"][i]["done"] = not self.data["tasks"][i]["done"]
+        save_data(self.data)
+        self.refresh()
+
+    def toggle_selected(self):
+        i = self.selected_index()
+        if i is None:
+            return
+        self.data["tasks"][i]["done"] = not self.data["tasks"][i]["done"]
+        save_data(self.data)
+        self.refresh()
+
+    def delete_task(self):
+        i = self.selected_index()
+        if i is None:
+            return
+        del self.data["tasks"][i]
+        save_data(self.data)
+        self.refresh()
+
+    def add_minutes(self):
+        d = QDialog(self)
+        d.setWindowTitle("Ghi thời gian học")
+        form = QFormLayout(d)
+        spin = QSpinBox()
+        spin.setRange(1, 1440)
+        spin.setValue(30)
+        spin.setSuffix(" phút")
+        form.addRow("Đã học:", spin)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                   QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(d.accept)
+        buttons.rejected.connect(d.reject)
+        form.addRow(buttons)
+        if d.exec():
+            minutes = spin.value()
+            today = date.today()
+            last = self.data.get("last_study")
+            if last != str(today):
+                if last == str(today - timedelta(days=1)):
+                    self.data["streak"] += 1
+                else:
+                    self.data["streak"] = 1
+                self.data["last_study"] = str(today)
+            self.data["study_minutes"] += minutes
+            save_data(self.data)
+            self.refresh()
+
+app = QApplication(sys.argv)
+app.setStyle("Fusion")
+app.setStyleSheet("""
+QWidget {
+    background: #f5f6f8;
+    color: #20242a;
+    font-family: "Segoe UI";
+    font-size: 14px;
+}
+#title { font-size: 30px; font-weight: 800; }
+#countdown { font-size: 28px; font-weight: 800; }
+#card {
+    background: white;
+    border: 1px solid #e2e5e9;
+    border-radius: 14px;
+}
+#section { font-size: 13px; font-weight: 800; letter-spacing: 1px; }
+#exam { font-size: 22px; font-weight: 700; }
+QListWidget {
+    border: 1px solid #e2e5e9;
+    border-radius: 9px;
+    background: #fafbfc;
+    padding: 5px;
+}
+QListWidget::item { padding: 10px; border-radius: 6px; }
+QListWidget::item:selected { background: #e9edf2; color: #111; }
+QPushButton {
+    border: 1px solid #d8dce1;
+    border-radius: 8px;
+    padding: 8px 13px;
+    background: white;
+}
+QPushButton:hover { background: #eef1f4; }
+QProgressBar {
+    border: 1px solid #d8dce1;
+    border-radius: 7px;
+    text-align: center;
+    height: 18px;
+}
+QProgressBar::chunk { background: #222831; border-radius: 6px; }
+QLineEdit, QComboBox, QSpinBox {
+    border: 1px solid #d8dce1;
+    border-radius: 7px;
+    padding: 7px;
+    background: white;
+}
+""")
+w = MainWindow()
+w.show()
+sys.exit(app.exec())
+'''
+
+(base/"main.py").write_text(app_py, encoding="utf-8")
+
+spec = r'''
+# -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_submodules
+hiddenimports = collect_submodules("PySide6")
+a = Analysis(
+    ['main.py'],
+    pathex=[],
+    binaries=[],
+    datas=[],
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+)
+pyz = PYZ(a.pure)
+exe = EXE(
+    pyz, a.scripts, a.binaries, a.datas, [],
+    name='300_Ngay_Study_Manager',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=False,
+)
+'''
+(base/"build.spec").write_text(spec, encoding="utf-8")
+
+requirements = "PySide6\npyinstaller\n"
+(base/"requirements.txt").write_text(requirements, encoding="utf-8")
+
+readme = """300 NGÀY — STUDY MANAGER
+
+Cách build file EXE trên Windows:
+1. Cài Python 3.11+.
+2. Mở CMD trong thư mục này.
+3. Chạy:
+   py -m pip install -r requirements.txt
+   pyinstaller --clean --noconfirm build.spec
+4. File EXE nằm trong thư mục dist.
+
+Mốc kỳ thi hiện đặt là 14/06/2027 (300 ngày tính từ 18/08/2026).
+Dữ liệu học tập được tự lưu tại thư mục người dùng.
+"""
+(base/"README.txt").write_text(readme, encoding="utf-8")
+
+# Try to build in this environment if possible
+build_status = ""
+try:
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "PySide6", "pyinstaller"],
+                   check=True, timeout=180)
+    r = subprocess.run([sys.executable, "-m", "PyInstaller", "--clean", "--noconfirm", "build.spec"],
+                       cwd=base, capture_output=True, text=True, timeout=240)
+    if r.returncode == 0 and (base/"dist"/"300_Ngay_Study_Manager.exe").exists():
+        build_status = "built"
+    else:
+        build_status = "failed"
+except Exception:
+    build_status = "unavailable"
+
+zip_path = Path("/mnt/data/300_Ngay_Study_Manager_source.zip")
+with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+    for p in base.iterdir():
+        if p.is_file():
+            z.write(p, arcname=p.name)
+
+if build_status == "built":
+    exe_path = base/"dist"/"300_Ngay_Study_Manager.exe"
+    print(f"EXE_READY:{exe_path}")
+else:
+    print(f"SOURCE_READY:{zip_path}")
