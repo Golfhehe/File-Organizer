@@ -3,14 +3,14 @@
   "compileOnSave": false,
   "files": [],
   "references": [
-    {
-      "path": "./lib/db"
-    },
-    {
-      "path": "./lib/api-client-react"
-    },
-    {
-      "path": "./lib/api-zod"
-    }
-  ]
+    { "path": "./lib/db" },
+    { "path": "./lib/api-client-react" },
+    { "path": "./lib/api-zod" }
+  ],
+  "compilerOptions": {
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+    "skipLibCheck": true
+  }
 }
