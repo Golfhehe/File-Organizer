@@ -11,6 +11,13 @@
     "strict": false,
     "noImplicitAny": false,
     "strictNullChecks": false,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "noImplicitThis": false,
+    "alwaysStrict": false,
+    "exactOptionalPropertyTypes": false,
+    "noImplicitReturns": false,
+    "noFallthroughCasesInSwitch": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
   }
 }
