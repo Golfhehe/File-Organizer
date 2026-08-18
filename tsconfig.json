@@ -1,12 +1,16 @@
 {
-  "compilerOptions": {
-    "skipLibCheck": true,
-    "checkJs": false,
-    "strict": false,
-    "noImplicitAny": false,
-    "strictNullChecks": false,
-    "noEmit": true
-  },
-  "include": [],
-  "exclude": ["**/*"]
+  "extends": "./tsconfig.base.json",
+  "compileOnSave": false,
+  "files": [],
+  "references": [
+    {
+      "path": "./lib/db"
+    },
+    {
+      "path": "./lib/api-client-react"
+    },
+    {
+      "path": "./lib/api-zod"
+    }
+  ]
 }
