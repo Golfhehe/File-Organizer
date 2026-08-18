@@ -1,0 +1,904 @@
+from pathlib import Path
+import shutil, zipfile, textwrap
+
+base = Path("/mnt/data/study_manager_300days_v2")
+if base.exists():
+    shutil.rmtree(base)
+base.mkdir(parents=True)
+
+app_py = r'''
+import sys, json, shutil
+from pathlib import Path
+from datetime import date, timedelta, datetime
+
+from PySide6.QtCore import Qt, QTimer, QDate
+from PySide6.QtGui import QFont, QPixmap, QIcon
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QLineEdit, QComboBox, QListWidget, QListWidgetItem, QProgressBar,
+    QFrame, QSpinBox, QMessageBox, QDialog, QDialogButtonBox, QFormLayout,
+    QTabWidget, QCalendarWidget, QTextEdit, QFileDialog, QScrollArea,
+    QGridLayout, QCheckBox, QTimeEdit, QGroupBox
+)
+
+APP_NAME = "300 Ngày — Study Manager V2"
+START_DATE = date(2026, 8, 18)
+EXAM_DATE = START_DATE + timedelta(days=299)
+TOTAL_DAYS = 300
+
+DATA_DIR = Path.home() / ".study_manager_300days"
+DATA_FILE = DATA_DIR / "data.json"
+JOURNAL_DIR = DATA_DIR / "journal"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+JOURNAL_DIR.mkdir(parents=True, exist_ok=True)
+
+DEFAULT = {
+    "tasks": [
+        {"name": "Ôn Hóa chuyên", "subject": "Hóa", "done": False, "xp": 20},
+        {"name": "Ôn Toán", "subject": "Toán", "done": False, "xp": 20},
+        {"name": "Ôn Tiếng Anh", "subject": "Anh", "done": False, "xp": 20},
+        {"name": "Luyện C++", "subject": "Tin", "done": False, "xp": 20},
+    ],
+    "study_minutes": 0,
+    "streak": 0,
+    "last_study": None,
+    "xp": 0,
+    "history": {},
+    "settings": {
+        "daily_goal": 120,
+        "focus_reminder": True,
+        "end_day_reminder": True,
+        "end_day_time": "21:30"
+    }
+}
+
+SUBJECTS = ["Hóa", "Toán", "Anh", "Tin", "KHTN", "Khác"]
+
+def load_data():
+    try:
+        data = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+        # Migration from V1 / missing fields
+        for k, v in DEFAULT.items():
+            if k not in data:
+                data[k] = v.copy() if isinstance(v, dict) else v
+        for t in data["tasks"]:
+            t.setdefault("xp", 20)
+        return data
+    except Exception:
+        save_data(DEFAULT)
+        return json.loads(json.dumps(DEFAULT))
+
+def save_data(data):
+    DATA_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+def today_key():
+    return str(date.today())
+
+def day_number(d=None):
+    d = d or date.today()
+    return min(TOTAL_DAYS, max(1, (d - START_DATE).days + 1))
+
+def elapsed_days():
+    return max(0, min(TOTAL_DAYS, (date.today() - START_DATE).days))
+
+def phase_for_day(n):
+    if n <= 60:
+        return ("🟢 Nền tảng", "Lấp lỗ hổng kiến thức")
+    if n <= 150:
+        return ("🔵 Tăng tốc", "Học chuyên đề")
+    if n <= 230:
+        return ("🟣 Nâng cao", "Bài khó + đề")
+    if n <= 280:
+        return ("🔴 Nước rút", "Luyện đề")
+    return ("⚡ 20 ngày cuối", "Tổng ôn")
+
+def level_info(xp):
+    level = xp // 100 + 1
+    current = xp % 100
+    return level, current, 100
+
+class AddTaskDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Thêm nhiệm vụ")
+        self.setMinimumWidth(380)
+        form = QFormLayout(self)
+        self.subject = QComboBox()
+        self.subject.addItems(SUBJECTS)
+        self.name = QLineEdit()
+        self.name.setPlaceholderText("Ví dụ: Làm đề Hóa số 5")
+        form.addRow("Môn:", self.subject)
+        form.addRow("Nhiệm vụ:", self.name)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+class JournalPage(QWidget):
+    def __init__(self, main):
+        super().__init__()
+        self.main = main
+        self.current_date = date.today()
+        root = QHBoxLayout(self)
+
+        left = QVBoxLayout()
+        self.calendar = QCalendarWidget()
+        self.calendar.setGridVisible(True)
+        self.calendar.clicked.connect(self.load_selected_day)
+        left.addWidget(QLabel("📅 NHẬT KÝ HỌC TẬP"))
+        left.addWidget(self.calendar)
+        self.day_info = QLabel()
+        self.day_info.setWordWrap(True)
+        left.addWidget(self.day_info)
+        root.addLayout(left, 1)
+
+        right = QVBoxLayout()
+        self.editor = QTextEdit()
+        self.editor.setPlaceholderText(
+            "Hôm nay ông đã học gì?\n"
+            "Chỗ nào chưa hiểu?\n"
+            "Mai cần làm gì?"
+        )
+        right.addWidget(QLabel("📝 Ghi chú"))
+        right.addWidget(self.editor, 1)
+
+        buttons = QHBoxLayout()
+        save = QPushButton("💾 Lưu nhật ký")
+        photo = QPushButton("📷 Thêm ảnh")
+        save.clicked.connect(self.save_journal)
+        photo.clicked.connect(self.add_photo)
+        buttons.addWidget(save)
+        buttons.addWidget(photo)
+        right.addLayout(buttons)
+
+        self.images = QGridLayout()
+        image_box = QWidget()
+        image_box.setLayout(self.images)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(image_box)
+        right.addWidget(QLabel("🖼 Ảnh đã lưu"))
+        right.addWidget(scroll, 1)
+
+        root.addLayout(right, 2)
+        self.load_selected_day(self.calendar.selectedDate())
+
+    def journal_file(self, d):
+        return JOURNAL_DIR / f"{d.isoformat()}.json"
+
+    def load_selected_day(self, qdate):
+        self.current_date = date(qdate.year(), qdate.month(), qdate.day())
+        self.editor.blockSignals(True)
+        info = self.main.data["history"].get(self.current_date.isoformat(), {})
+        self.editor.setPlainText(info.get("note", ""))
+        self.editor.blockSignals(False)
+        self.day_info.setText(
+            f"Ngày {day_number(self.current_date)}/{TOTAL_DAYS}  •  "
+            f"{self.current_date.strftime('%d/%m/%Y')}"
+        )
+        self.clear_images()
+        for p in info.get("images", []):
+            self.add_thumbnail(Path(p), save=False)
+
+    def clear_images(self):
+        while self.images.count():
+            item = self.images.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def add_thumbnail(self, path, save=True):
+        if not path.exists():
+            return
+        label = QLabel()
+        label.setFixedSize(180, 130)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setToolTip(str(path))
+        pix = QPixmap(str(path))
+        if not pix.isNull():
+            label.setPixmap(
+                pix.scaled(
+                    170, 120,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+            )
+        idx = self.images.count()
+        self.images.addWidget(label, idx // 3, idx % 3)
+
+    def save_journal(self):
+        key = self.current_date.isoformat()
+        old = self.main.data["history"].get(key, {})
+        self.main.data["history"][key] = {
+            "minutes": old.get("minutes", 0),
+            "tasks": old.get("tasks", 0),
+            "note": self.editor.toPlainText(),
+            "images": old.get("images", [])
+        }
+        save_data(self.main.data)
+        self.main.refresh_all()
+        self.main.notify("Nhật ký đã lưu", f"Đã lưu nhật ký ngày {self.current_date.strftime('%d/%m/%Y')}.")
+
+    def add_photo(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Chọn ảnh học tập", "", "Images (*.png *.jpg *.jpeg *.webp *.bmp)"
+        )
+        if not files:
+            return
+        key = self.current_date.isoformat()
+        info = self.main.data["history"].setdefault(
+            key, {"minutes": 0, "tasks": 0, "note": "", "images": []}
+        )
+        day_dir = JOURNAL_DIR / self.current_date.isoformat()
+        day_dir.mkdir(parents=True, exist_ok=True)
+        for src in files:
+            src = Path(src)
+            dst = day_dir / src.name
+            # avoid overwriting another image with same filename
+            if dst.exists():
+                dst = day_dir / f"{datetime.now().strftime('%H%M%S')}_{src.name}"
+            shutil.copy2(src, dst)
+            info["images"].append(str(dst))
+        save_data(self.main.data)
+        self.load_selected_day(
+            QDate(self.current_date.year, self.current_date.month, self.current_date.day)
+        )
+
+class PomodoroPage(QWidget):
+    def __init__(self, main):
+        super().__init__()
+        self.main = main
+        self.running = False
+        self.remaining = 25 * 60
+        self.mode = "Học"
+
+        root = QVBoxLayout(self)
+        root.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.mode_label = QLabel("🍅 POMODORO — HỌC")
+        self.mode_label.setObjectName("section")
+        self.clock = QLabel("25:00")
+        self.clock.setObjectName("pomodoro")
+        self.status = QLabel("Sẵn sàng. Khi bắt đầu, app sẽ nhắc ông bật app chống mất tập trung.")
+        self.status.setWordWrap(True)
+        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        root.addWidget(self.mode_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self.clock, alignment=Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self.status, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        row = QHBoxLayout()
+        start = QPushButton("▶ Bắt đầu")
+        pause = QPushButton("⏸ Tạm dừng")
+        reset = QPushButton("↺ Đặt lại")
+        start.clicked.connect(self.start)
+        pause.clicked.connect(self.pause)
+        reset.clicked.connect(self.reset)
+        row.addWidget(start)
+        row.addWidget(pause)
+        row.addWidget(reset)
+        root.addLayout(row)
+
+        presets = QHBoxLayout()
+        for text, sec in [("25 / 5", 25*60), ("50 / 10", 50*60), ("90 / 15", 90*60)]:
+            b = QPushButton(text)
+            b.clicked.connect(lambda _, s=sec: self.set_work_time(s))
+            presets.addWidget(b)
+        root.addLayout(presets)
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.tick)
+
+    def set_work_time(self, seconds):
+        if not self.running:
+            self.remaining = seconds
+            self.clock.setText(self.format_time())
+            self.status.setText("Đã chọn phiên học mới.")
+
+    def format_time(self):
+        return f"{self.remaining // 60:02d}:{self.remaining % 60:02d}"
+
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        self.timer.start(1000)
+        self.status.setText("Tập trung thôi ông. Bật app chống mất tập trung nếu cần nhé.")
+        if self.main.data["settings"].get("focus_reminder", True):
+            self.main.notify(
+                "🍅 Pomodoro bắt đầu",
+                "Bật app chống mất tập trung, đóng tab linh tinh và chiến thôi =))"
+            )
+
+    def pause(self):
+        self.running = False
+        self.timer.stop()
+        self.status.setText("Đã tạm dừng.")
+
+    def reset(self):
+        self.running = False
+        self.timer.stop()
+        self.remaining = 25 * 60
+        self.mode = "Học"
+        self.mode_label.setText("🍅 POMODORO — HỌC")
+        self.clock.setText(self.format_time())
+        self.status.setText("Sẵn sàng.")
+
+    def tick(self):
+        self.remaining -= 1
+        self.clock.setText(self.format_time())
+        if self.remaining <= 0:
+            self.running = False
+            self.timer.stop()
+            if self.mode == "Học":
+                self.main.add_study_minutes(25, silent=True)
+                self.main.notify("🎉 Hết phiên học!", "Ông vừa hoàn thành một phiên Pomodoro. Nghỉ 5 phút nhé.")
+                self.mode = "Nghỉ"
+                self.mode_label.setText("☕ POMODORO — NGHỈ")
+                self.remaining = 5 * 60
+                self.clock.setText(self.format_time())
+                self.status.setText("Nghỉ 5 phút. Sau đó có thể bắt đầu phiên tiếp theo.")
+            else:
+                self.notify_break_done()
+
+    def notify_break_done(self):
+        self.main.notify("⏰ Hết giờ nghỉ", "Quay lại học thôi ông =))")
+        self.mode = "Học"
+        self.mode_label.setText("🍅 POMODORO — HỌC")
+        self.remaining = 25 * 60
+        self.clock.setText(self.format_time())
+        self.status.setText("Sẵn sàng cho phiên học tiếp theo.")
+
+class AIPage(QWidget):
+    def __init__(self, main):
+        super().__init__()
+        self.main = main
+        root = QVBoxLayout(self)
+
+        title = QLabel("🤖 TRỢ LÝ 300 NGÀY")
+        title.setObjectName("title_small")
+        root.addWidget(title)
+
+        self.analysis = QLabel()
+        self.analysis.setWordWrap(True)
+        self.analysis.setObjectName("ai_box")
+        root.addWidget(self.analysis)
+
+        self.plan = QTextEdit()
+        self.plan.setReadOnly(True)
+        root.addWidget(QLabel("📋 Kế hoạch đề xuất"))
+        root.addWidget(self.plan, 1)
+
+        b = QPushButton("🤖 Tạo kế hoạch hôm nay")
+        b.clicked.connect(self.generate)
+        root.addWidget(b)
+
+        self.generate()
+
+    def generate(self):
+        d = self.main.data
+        today = today_key()
+        h = d["history"].get(today, {})
+        minutes = h.get("minutes", 0)
+        tasks_done = h.get("tasks", 0)
+
+        by_subject = {}
+        for t in d["tasks"]:
+            if t["done"]:
+                by_subject[t["subject"]] = by_subject.get(t["subject"], 0) + 1
+
+        subject_totals = {}
+        for t in d["tasks"]:
+            subject_totals[t["subject"]] = subject_totals.get(t["subject"], 0) + 1
+
+        weakest = None
+        weakest_pct = 101
+        for sub, total in subject_totals.items():
+            pct = by_subject.get(sub, 0) / total * 100
+            if pct < weakest_pct:
+                weakest_pct = pct
+                weakest = sub
+
+        n = day_number()
+        phase, goal = phase_for_day(n)
+        left = max(0, (EXAM_DATE - date.today()).days)
+
+        lines = [
+            f"📅 Hôm nay là ngày {n}/{TOTAL_DAYS}. Còn {left} ngày.",
+            f"🧭 Giai đoạn: {phase} — {goal}.",
+            f"⏱ Hôm nay đã ghi nhận: {minutes} phút học.",
+            f"✓ Nhiệm vụ hoàn thành hôm nay: {tasks_done}.",
+        ]
+
+        if minutes < d["settings"].get("daily_goal", 120):
+            lines.append(
+                f"⚠️ Ông đang dưới mục tiêu {d['settings'].get('daily_goal',120)} phút."
+            )
+        else:
+            lines.append("🔥 Mục tiêu thời gian hôm nay đã đạt.")
+
+        if weakest:
+            lines.append(
+                f"📚 Môn đang cần chú ý: {weakest} ({weakest_pct:.0f}% nhiệm vụ hiện tại đã hoàn thành)."
+            )
+
+        self.analysis.setText("\n".join(lines))
+
+        plan = []
+        if weakest:
+            plan.append(f"1. 📚 {weakest} — 45 phút\n   Ưu tiên phần đang yếu nhất.")
+        if "Tin" != weakest:
+            plan.append("2. 💻 Tin/C++ — 30 phút\n   Luyện 1–2 bài ngắn, giữ nhịp.")
+        plan.append("3. 🧠 Ôn lại lỗi hôm nay — 15 phút\n   Ghi vào nhật ký học tập.")
+        plan.append(f"\nTổng đề xuất: khoảng {45 + 30 + 15} phút.")
+        self.plan.setPlainText("\n\n".join(plan))
+
+class DashboardPage(QWidget):
+    def __init__(self, main):
+        super().__init__()
+        self.main = main
+        root = QVBoxLayout(self)
+
+        self.header = QLabel()
+        self.header.setObjectName("title")
+        root.addWidget(self.header)
+
+        grid = QGridLayout()
+        self.exam = self.card("KỲ THI")
+        self.progress = self.card("TIẾN ĐỘ 300 NGÀY")
+        self.today = self.card("HÔM NAY")
+        self.level = self.card("XP / LEVEL")
+        grid.addWidget(self.exam, 0, 0)
+        grid.addWidget(self.progress, 0, 1)
+        grid.addWidget(self.today, 1, 0)
+        grid.addWidget(self.level, 1, 1)
+        root.addLayout(grid)
+
+        self.ai = QFrame()
+        self.ai.setObjectName("card")
+        l = QVBoxLayout(self.ai)
+        l.addWidget(QLabel("🤖 TRỢ LÝ HÔM NAY"))
+        self.ai_text = QLabel()
+        self.ai_text.setWordWrap(True)
+        l.addWidget(self.ai_text)
+        b = QPushButton("Mở trợ lý")
+        b.clicked.connect(lambda: self.main.tabs.setCurrentIndex(4))
+        l.addWidget(b)
+        root.addWidget(self.ai)
+
+        root.addStretch()
+
+    def card(self, title):
+        f = QFrame()
+        f.setObjectName("card")
+        l = QVBoxLayout(f)
+        l.addWidget(QLabel(title))
+        lab = QLabel()
+        lab.setObjectName("big_stat")
+        lab.setWordWrap(True)
+        l.addWidget(lab)
+        f.value_label = lab
+        return f
+
+    def refresh(self):
+        n = day_number()
+        left = max(0, (EXAM_DATE - date.today()).days)
+        self.header.setText("300 NGÀY — DASHBOARD")
+        self.exam.value_label.setText(
+            f"{EXAM_DATE.strftime('%d/%m/%Y')}\nCòn {left} ngày"
+        )
+        p = n / TOTAL_DAYS * 100
+        self.progress.value_label.setText(
+            f"Ngày {n}/{TOTAL_DAYS}\nTiến độ thời gian: {p:.1f}%"
+        )
+        h = self.main.data["history"].get(today_key(), {})
+        mins = h.get("minutes", 0)
+        goal = self.main.data["settings"].get("daily_goal", 120)
+        self.today.value_label.setText(
+            f"{mins}/{goal} phút\n"
+            f"{h.get('tasks', 0)} nhiệm vụ hoàn thành"
+        )
+        xp = self.main.data.get("xp", 0)
+        lv, cur, need = level_info(xp)
+        self.level.value_label.setText(f"Level {lv}\n{cur}/{need} XP")
+
+        if mins >= goal:
+            msg = "🔥 Mục tiêu hôm nay đạt rồi. Đỉnh!"
+        else:
+            msg = f"⚠️ Còn {goal - mins} phút nữa để đạt mục tiêu hôm nay."
+        self.ai_text.setText(msg)
+
+class MainWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.data = load_data()
+        self.setWindowTitle(APP_NAME)
+        self.resize(1200, 760)
+        self.setMinimumSize(980, 650)
+        self.last_end_day_notification = None
+        self.build_ui()
+        self.refresh_all()
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.background_check)
+        self.timer.start(30000)
+
+    def build_ui(self):
+        root = QVBoxLayout(self)
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs)
+
+        self.dashboard = DashboardPage(self)
+        self.journal = JournalPage(self)
+        self.pomodoro = PomodoroPage(self)
+        self.tasks_page = self.build_tasks_page()
+        self.ai_page = AIPage(self)
+
+        self.tabs.addTab(self.dashboard, "🏠 Dashboard")
+        self.tabs.addTab(self.journal, "📅 Nhật ký")
+        self.tabs.addTab(self.pomodoro, "🍅 Pomodoro")
+        self.tabs.addTab(self.tasks_page, "✓ Nhiệm vụ")
+        self.tabs.addTab(self.ai_page, "🤖 AI trợ lý")
+
+    def build_tasks_page(self):
+        w = QWidget()
+        root = QVBoxLayout(w)
+
+        title = QLabel("✓ NHIỆM VỤ")
+        title.setObjectName("title_small")
+        root.addWidget(title)
+
+        self.tasks = QListWidget()
+        self.tasks.itemDoubleClicked.connect(self.toggle_task)
+        root.addWidget(self.tasks, 1)
+
+        row = QHBoxLayout()
+        for text, fn in [
+            ("+ Thêm", self.add_task),
+            ("✓ Hoàn thành", self.toggle_selected),
+            ("Xóa", self.delete_task)
+        ]:
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        root.addLayout(row)
+
+        self.task_progress = QProgressBar()
+        root.addWidget(self.task_progress)
+        self.task_progress_text = QLabel()
+        root.addWidget(self.task_progress_text)
+        return w
+
+    def refresh_all(self):
+        self.refresh_tasks()
+        self.dashboard.refresh()
+        self.ai_page.generate()
+        self.journal.load_selected_day(
+            QDate(self.journal.current_date.year,
+                  self.journal.current_date.month,
+                  self.journal.current_date.day)
+        )
+
+    def refresh_tasks(self):
+        self.tasks.clear()
+        done = 0
+        for i, task in enumerate(self.data["tasks"]):
+            mark = "✓" if task["done"] else "○"
+            item = QListWidgetItem(
+                f"{mark}  [{task['subject']}]  {task['name']}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, i)
+            self.tasks.addItem(item)
+            if task["done"]:
+                done += 1
+        total = len(self.data["tasks"])
+        pct = round(done / total * 100) if total else 0
+        self.task_progress.setValue(pct)
+        self.task_progress_text.setText(
+            f"{done}/{total} nhiệm vụ hoàn thành • {pct}%"
+        )
+
+    def selected_index(self):
+        item = self.tasks.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def add_task(self):
+        d = AddTaskDialog(self)
+        if d.exec():
+            name = d.name.text().strip()
+            if not name:
+                QMessageBox.warning(self, "Thiếu nhiệm vụ", "Nhập nhiệm vụ trước nha.")
+                return
+            self.data["tasks"].append({
+                "name": name,
+                "subject": d.subject.currentText(),
+                "done": False,
+                "xp": 20
+            })
+            save_data(self.data)
+            self.refresh_all()
+
+    def toggle_task(self, item):
+        self._toggle(item.data(Qt.ItemDataRole.UserRole))
+
+    def toggle_selected(self):
+        i = self.selected_index()
+        if i is not None:
+            self._toggle(i)
+
+    def _toggle(self, i):
+        was_done = self.data["tasks"][i]["done"]
+        self.data["tasks"][i]["done"] = not was_done
+        if not was_done:
+            self.data["xp"] += self.data["tasks"][i].get("xp", 20)
+            self.record_task_done()
+            self.notify("✓ Nhiệm vụ hoàn thành", "+20 XP. Tiếp tục chiến!")
+        save_data(self.data)
+        self.refresh_all()
+
+    def record_task_done(self):
+        key = today_key()
+        h = self.data["history"].setdefault(
+            key, {"minutes": 0, "tasks": 0, "note": "", "images": []}
+        )
+        h["tasks"] += 1
+
+    def delete_task(self):
+        i = self.selected_index()
+        if i is not None:
+            del self.data["tasks"][i]
+            save_data(self.data)
+            self.refresh_all()
+
+    def add_study_minutes(self, minutes, silent=False):
+        self.data["study_minutes"] += minutes
+        key = today_key()
+        h = self.data["history"].setdefault(
+            key, {"minutes": 0, "tasks": 0, "note": "", "images": []}
+        )
+        h["minutes"] += minutes
+
+        last = self.data.get("last_study")
+        today = date.today()
+        if last != str(today):
+            if last == str(today - timedelta(days=1)):
+                self.data["streak"] += 1
+            else:
+                self.data["streak"] = 1
+            self.data["last_study"] = str(today)
+
+        self.data["xp"] += max(1, minutes // 3)
+        save_data(self.data)
+        self.refresh_all()
+        if not silent:
+            self.notify("⏱ Đã ghi thời gian", f"+{minutes} phút học • XP tăng.")
+
+    def add_minutes_dialog(self):
+        d = QDialog(self)
+        d.setWindowTitle("Ghi thời gian học")
+        form = QFormLayout(d)
+        spin = QSpinBox()
+        spin.setRange(1, 1440)
+        spin.setValue(30)
+        spin.setSuffix(" phút")
+        form.addRow("Đã học:", spin)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(d.accept)
+        buttons.rejected.connect(d.reject)
+        form.addRow(buttons)
+        if d.exec():
+            self.add_study_minutes(spin.value())
+
+    def notify(self, title, message):
+        # Cross-platform fallback: dialog; Windows tray notifications can be
+        # added later without changing the data model.
+        if not self.isActiveWindow():
+            QMessageBox.information(self, title, message)
+        else:
+            # Small status popup is less intrusive while user is in the app.
+            self.status_message = QLabel(f"{title}: {message}", self)
+            self.status_message.setObjectName("toast")
+            self.status_message.setWordWrap(True)
+            self.status_message.adjustSize()
+            self.status_message.move(30, self.height() - 100)
+            self.status_message.show()
+            QTimer.singleShot(4500, self.status_message.deleteLater)
+
+    def background_check(self):
+        now = datetime.now()
+        if (
+            self.data["settings"].get("end_day_reminder", True)
+            and now.strftime("%H:%M") == self.data["settings"].get("end_day_time", "21:30")
+            and self.last_end_day_notification != today_key()
+        ):
+            self.last_end_day_notification = today_key()
+            h = self.data["history"].get(today_key(), {})
+            mins = h.get("minutes", 0)
+            self.notify(
+                "🌙 Cuối ngày rồi!",
+                f"Ông đã ghi {mins} phút hôm nay. Nhớ lưu nhật ký và tiến độ trước khi nghỉ nhé."
+            )
+
+    def closeEvent(self, event):
+        # Always remind before closing, but allow quick exit.
+        reply = QMessageBox.question(
+            self,
+            "Lưu tiến độ",
+            "Trước khi thoát: ông đã lưu nhật ký hôm nay chưa?\n"
+            "Dữ liệu tự lưu khi thao tác, nhưng nhật ký chữ cần bấm 'Lưu nhật ký'.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            event.accept()
+        else:
+            event.ignore()
+
+app = QApplication(sys.argv)
+app.setStyle("Fusion")
+app.setStyleSheet("""
+QWidget {
+    background: #f5f6f8;
+    color: #20242a;
+    font-family: "Segoe UI";
+    font-size: 14px;
+}
+QTabWidget::pane {
+    border: 1px solid #e0e3e7;
+    background: #f5f6f8;
+    border-radius: 10px;
+}
+QTabBar::tab {
+    padding: 10px 16px;
+    margin-right: 3px;
+    background: #e9edf1;
+    border-radius: 7px;
+}
+QTabBar::tab:selected {
+    background: white;
+    font-weight: 700;
+}
+#title { font-size: 28px; font-weight: 800; }
+#title_small { font-size: 22px; font-weight: 800; }
+#section { font-size: 13px; font-weight: 800; letter-spacing: 1px; }
+#big_stat { font-size: 21px; font-weight: 700; }
+#pomodoro { font-size: 72px; font-weight: 800; margin: 20px; }
+#ai_box {
+    background: white;
+    border: 1px solid #dfe3e8;
+    border-radius: 12px;
+    padding: 16px;
+}
+#toast {
+    background: #20242a;
+    color: white;
+    border-radius: 10px;
+    padding: 12px 16px;
+}
+#card {
+    background: white;
+    border: 1px solid #e2e5e9;
+    border-radius: 14px;
+}
+QListWidget {
+    border: 1px solid #e2e5e9;
+    border-radius: 9px;
+    background: #fafbfc;
+    padding: 5px;
+}
+QListWidget::item { padding: 10px; border-radius: 6px; }
+QListWidget::item:selected { background: #e9edf2; color: #111; }
+QPushButton {
+    border: 1px solid #d8dce1;
+    border-radius: 8px;
+    padding: 8px 13px;
+    background: white;
+}
+QPushButton:hover { background: #eef1f4; }
+QProgressBar {
+    border: 1px solid #d8dce1;
+    border-radius: 7px;
+    text-align: center;
+    height: 18px;
+}
+QProgressBar::chunk { background: #222831; border-radius: 6px; }
+QLineEdit, QComboBox, QSpinBox, QTextEdit {
+    border: 1px solid #d8dce1;
+    border-radius: 7px;
+    padding: 7px;
+    background: white;
+}
+QCalendarWidget {
+    background: white;
+}
+""")
+
+w = MainWindow()
+w.show()
+sys.exit(app.exec())
+'''
+
+(base / "main.py").write_text(app_py, encoding="utf-8")
+
+spec = r'''
+# -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_submodules
+
+hiddenimports = collect_submodules("PySide6")
+
+a = Analysis(
+    ['main.py'],
+    pathex=[],
+    binaries=[],
+    datas=[],
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+)
+pyz = PYZ(a.pure)
+exe = EXE(
+    pyz, a.scripts, a.binaries, a.datas, [],
+    name='300_Ngay_Study_Manager_V2',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=False,
+)
+'''
+(base / "build.spec").write_text(spec, encoding="utf-8")
+
+(base / "requirements.txt").write_text("PySide6\npyinstaller\n", encoding="utf-8")
+
+readme = """300 NGÀY — STUDY MANAGER V2
+
+Tính năng:
+- Dashboard 300 ngày
+- Tiến độ và giai đoạn 300 ngày
+- Nhiệm vụ + XP + Level
+- AI offline kiểu rule-based
+- AI đề xuất kế hoạch
+- Pomodoro 25/5, 50/10, 90/15
+- Nhắc bật app chống mất tập trung khi bắt đầu Pomodoro
+- Nhắc lưu nhật ký cuối ngày
+- Nhật ký theo lịch
+- Ghi chú riêng từng ngày
+- Chụp/chọn ảnh và lưu theo từng ngày
+- Lịch sử thời gian học
+- Streak
+- Tự lưu dữ liệu
+
+Ngày bắt đầu: 18/08/2026
+Ngày thi: 14/06/2027
+Tổng: 300 ngày
+
+Dữ liệu:
+%USERPROFILE%\\.study_manager_300days\\
+
+Build EXE trên Windows:
+1. Cài Python 3.11+
+2. Mở CMD trong thư mục project
+3. py -m pip install -r requirements.txt
+4. pyinstaller --clean --noconfirm build.spec
+5. EXE nằm trong dist/
+"""
+(base / "README.txt").write_text(readme, encoding="utf-8")
+
+# Zip source
+zip_path = Path("/mnt/data/300_Ngay_Study_Manager_V2.zip")
+with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+    for p in base.iterdir():
+        if p.is_file():
+            z.write(p, arcname=p.name)
+
+print(f"Đã tạo bản V2: {zip_path}")
