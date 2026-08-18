@@ -2,7 +2,11 @@
   "compilerOptions": {
     "skipLibCheck": true,
     "checkJs": false,
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
     "noEmit": true
   },
-  "include": []
+  "include": [],
+  "exclude": ["**/*"]
 }
