@@ -1,23 +1,22 @@
 {
-  "extends": "./tsconfig.base.json",
-  "compileOnSave": false,
-  "files": [],
-  "references": [
-    { "path": "./lib/db" },
-    { "path": "./lib/api-client-react" },
-    { "path": "./lib/api-zod" }
-  ],
-  "compilerOptions": {
-    "strict": false,
-    "noImplicitAny": false,
-    "strictNullChecks": false,
-    "skipLibCheck": true,
-    "noImplicitThis": false,
-    "alwaysStrict": false,
-    "exactOptionalPropertyTypes": false,
-    "noImplicitReturns": false,
-    "noFallthroughCasesInSwitch": false,
-    "noUnusedLocals": false,
-    "noUnusedParameters": false
+  "name": "@workspace/api-server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --clear-screen=false src/index.ts",
+    "build": "node ./build.mjs",
+    "start": "node dist/index.mjs"
+  },
+  "dependencies": {
+    "@fastify/cors": "^9.0.1",
+    "fastify": "^4.28.1",
+    "pino": "^9.2.0",
+    "pino-pretty": "^11.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.9",
+    "tsx": "^4.15.7",
+    "typescript": "^5.5.2"
   }
 }
